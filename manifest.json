@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Business Suite Voice Note",
+  "version": "1.0",
+  "description": "Add push-to-talk voice notes to Meta Business Suite",
+  "permissions": ["scripting", "activeTab"],
+  
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  
+  "background": {
+    
+  },
+  
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Messenger Voice Note"
+  },
+  
+  "content_scripts": [
+    {
+      "matches": ["https://business.facebook.com/latest/inbox/*"],
+      "js": ["scripts/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
