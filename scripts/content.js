@@ -4,29 +4,32 @@
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
-let isHoveringButton = false;
+
+// --- VISUALIZER & AUDIO VARIABLES ---
+let audioContext = null;
+let animationFrameId = null;
 
 // ====== RECORDING HANDLERS ======
 async function startRecording(e) {
-  if (e.type === "mousedown") e.preventDefault();
+  if (e && e.type === "click") e.preventDefault();
 
-  if (isRecording) return;
+  if (isRecording) {
+    stopRecordingAndSend();
+    return;
+  }
 
-  // --- NEW: Permission Check Check ---
+  // --- Permission Check ---
   try {
     const permissionStatus = await navigator.permissions.query({
       name: "microphone",
     });
     if (permissionStatus.state === "prompt") {
       showPermissionEducation();
-      return; // Stop here, don't try to record yet
+      return;
     }
   } catch (err) {
     console.log("Permission API not supported, falling back.", err);
   }
-  // -----------------------------------
-
-  isHoveringButton = true;
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -41,42 +44,27 @@ async function startRecording(e) {
 
     const wrapper = document.querySelector("#voice-mic-btn-wrapper");
     if (wrapper) {
-      const popup = getOrCreatePopup(wrapper);
-      popup.style.display = "flex";
-      popup.style.background = "#E41E3F";
-      document.getElementById("voice-recording-text").innerText =
-        "Recording... Slide away to cancel";
-      document.getElementById("voice-recording-dot").style.display = "block";
+      const controls = getOrCreateControls(wrapper);
+      controls.style.display = "flex";
     }
 
-    document.addEventListener("mouseup", handleGlobalMouseUp);
-    document.addEventListener("touchend", handleGlobalMouseUp);
+    startVisualizer(stream);
   } catch (err) {
     console.log("Microphone access error:", err);
-    // If they denied it previously, show them a friendly error
     alert(
       "Microphone access is blocked. Please click the icon in your URL bar to allow it.",
     );
   }
 }
 
-function handleGlobalMouseUp() {
-  document.removeEventListener("mouseup", handleGlobalMouseUp);
-  document.removeEventListener("touchend", handleGlobalMouseUp);
-
-  if (isHoveringButton) {
-    stopRecordingAndSend();
-  } else {
-    cancelRecording();
-  }
-}
-
 function cleanupUI() {
+  if (animationFrameId) cancelAnimationFrame(animationFrameId);
+
   const micIcon = document.querySelector("#mic-svg-icon");
   if (micIcon) micIcon.style.color = "currentColor";
 
-  const popup = document.getElementById("voice-recording-popup");
-  if (popup) popup.style.display = "none";
+  const controls = document.getElementById("voice-recording-controls");
+  if (controls) controls.style.display = "none";
 }
 
 async function stopRecordingAndSend() {
@@ -85,13 +73,52 @@ async function stopRecordingAndSend() {
 
   return new Promise((resolve) => {
     mediaRecorder.onstop = async () => {
-      const blob = new Blob(audioChunks, { type: "audio/webm" });
+      const webmBlob = new Blob(audioChunks, { type: "audio/webm" });
       isRecording = false;
-      // console.log("⏹️ Recording stopped. Sending...");
+
       try {
-        await attachAndSendAudio(blob);
+        // --- NEW: LAMEJS MP3 ENCODING PIPELINE ---
+        const arrayBuffer = await webmBlob.arrayBuffer();
+        if (!audioContext)
+          audioContext = new (
+            window.AudioContext || window.webkitAudioContext
+          )();
+
+        // Decode the raw webm audio
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+        // Prepare LameJS Encoder (Mono, 128kbps)
+        const sampleRate = audioBuffer.sampleRate;
+        const mp3encoder = new lamejs.Mp3Encoder(1, sampleRate, 128);
+        const samples = audioBuffer.getChannelData(0); // Get mono audio track
+        const mp3Data = [];
+
+        // Convert float32 audio data to int16 (Required by LameJS)
+        const sampleBlockSize = 1152;
+        const intSamples = new Int16Array(samples.length);
+        for (let i = 0; i < samples.length; i++) {
+          let sample = samples[i];
+          // Fast clamp and scale to 16-bit signed integer
+          sample = sample < 0 ? sample * 32768 : sample * 32767;
+          intSamples[i] = sample;
+        }
+
+        // Encode in chunks
+        for (let i = 0; i < intSamples.length; i += sampleBlockSize) {
+          const chunk = intSamples.subarray(i, i + sampleBlockSize);
+          const mp3buf = mp3encoder.encodeBuffer(chunk);
+          if (mp3buf.length > 0) mp3Data.push(mp3buf);
+        }
+
+        // Flush the final data
+        const mp3buf = mp3encoder.flush();
+        if (mp3buf.length > 0) mp3Data.push(mp3buf);
+
+        // Compile the final MP3 file
+        const mp3Blob = new Blob(mp3Data, { type: "audio/mp3" });
+        await attachAndSendAudio(mp3Blob);
       } catch (err) {
-        console.log("Error sending audio:", err);
+        console.log("Error encoding MP3:", err);
       }
       resolve();
     };
@@ -107,11 +134,72 @@ function cancelRecording() {
 
   mediaRecorder.onstop = () => {
     isRecording = false;
-    // console.log("🚫 Recording cancelled by user sliding away.");
   };
 
   mediaRecorder.stop();
   mediaRecorder.stream?.getTracks()?.forEach((t) => t.stop());
+}
+
+// ====== AUDIO WAVE VISUALIZER ======
+function startVisualizer(stream) {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  } else if (audioContext.state === "suspended") {
+    audioContext.resume();
+  }
+
+  const source = audioContext.createMediaStreamSource(stream);
+  const analyser = audioContext.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
+
+  const bufferLength = analyser.frequencyBinCount;
+  const dataArray = new Uint8Array(bufferLength);
+
+  const canvas = document.getElementById("voice-visualizer");
+  if (!canvas) return;
+  const canvasCtx = canvas.getContext("2d");
+
+  function draw() {
+    if (!isRecording) return;
+    animationFrameId = requestAnimationFrame(draw);
+
+    analyser.getByteFrequencyData(dataArray);
+    canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const barWidth = 3;
+    const gap = 3;
+    const numBars = Math.floor(canvas.width / (barWidth + gap));
+    const step = Math.max(1, Math.floor(bufferLength / numBars));
+
+    let x = 0;
+    for (let i = 0; i < numBars; i++) {
+      let sum = 0;
+      for (let j = 0; j < step; j++) {
+        if (i * step + j < bufferLength) {
+          sum += dataArray[i * step + j];
+        }
+      }
+      let average = sum / step;
+
+      const barHeight = Math.max(2, (average / 255) * canvas.height);
+      const y = (canvas.height - barHeight) / 2;
+
+      canvasCtx.fillStyle = "#1c1e21";
+
+      if (canvasCtx.roundRect) {
+        canvasCtx.beginPath();
+        canvasCtx.roundRect(x, y, barWidth, barHeight, 2);
+        canvasCtx.fill();
+      } else {
+        canvasCtx.fillRect(x, y, barWidth, barHeight);
+      }
+
+      x += barWidth + gap;
+    }
+  }
+
+  draw();
 }
 
 // ====== INJECT MIC BUTTON ======
@@ -135,7 +223,7 @@ function injectMicButton() {
 
   const clickableArea = micWrapperClone.querySelector('[role="button"]');
   if (clickableArea) {
-    clickableArea.setAttribute("aria-label", "Hold to record voice note");
+    clickableArea.setAttribute("aria-label", "Click to record voice note");
     clickableArea.id = "voice-mic-btn";
   }
 
@@ -149,59 +237,16 @@ function injectMicButton() {
   }
 
   const targetBtn = clickableArea || micWrapperClone;
-
-  targetBtn.addEventListener("mousedown", startRecording);
-  targetBtn.addEventListener("touchstart", startRecording);
-
-  targetBtn.addEventListener("mouseleave", () => {
-    if (!isRecording) return;
-    isHoveringButton = false;
-    const popup = document.getElementById("voice-recording-popup");
-    if (popup) {
-      popup.style.background = "#65676B";
-      document.getElementById("voice-recording-dot").style.display = "none";
-      document.getElementById("voice-recording-text").innerText =
-        "Release to cancel 🗑️";
-    }
-  });
-
-  targetBtn.addEventListener("mouseenter", () => {
-    if (!isRecording) return;
-    isHoveringButton = true;
-    const popup = document.getElementById("voice-recording-popup");
-    if (popup) {
-      popup.style.background = "#E41E3F";
-      document.getElementById("voice-recording-dot").style.display = "block";
-      document.getElementById("voice-recording-text").innerText =
-        "Release to send 📤";
-    }
-  });
-
-  targetBtn.addEventListener("touchmove", (e) => {
-    if (!isRecording) return;
-    const touch = e.touches[0];
-    const rect = targetBtn.getBoundingClientRect();
-    const isInside =
-      touch.clientX >= rect.left &&
-      touch.clientX <= rect.right &&
-      touch.clientY >= rect.top &&
-      touch.clientY <= rect.bottom;
-
-    if (isInside && !isHoveringButton) {
-      targetBtn.dispatchEvent(new Event("mouseenter"));
-    } else if (!isInside && isHoveringButton) {
-      targetBtn.dispatchEvent(new Event("mouseleave"));
-    }
-  });
+  targetBtn.addEventListener("click", startRecording);
 
   buttonWrapper.insertAdjacentElement("afterend", micWrapperClone);
 }
 
-// ====== POPUP UI GENERATOR ======
-function getOrCreatePopup(wrapperElement) {
-  let popup = document.getElementById("voice-recording-popup");
+// ====== INTERACTIVE FLOATING CONTROLS ======
+function getOrCreateControls(wrapperElement) {
+  let controls = document.getElementById("voice-recording-controls");
 
-  if (!popup) {
+  if (!controls) {
     const style = document.createElement("style");
     style.innerHTML = `
       @keyframes pulse-dot {
@@ -210,56 +255,72 @@ function getOrCreatePopup(wrapperElement) {
         100% { transform: scale(0.95); opacity: 1; }
       }
       #voice-recording-dot { animation: pulse-dot 1.5s infinite; }
+      .voice-ctrl-btn {
+        border: none; padding: 6px 12px; border-radius: 14px; font-weight: bold; 
+        font-size: 13px; cursor: pointer; transition: opacity 0.2s; color: white;
+      }
+      .voice-ctrl-btn:hover { opacity: 0.8; }
     `;
     document.head.appendChild(style);
 
-    popup = document.createElement("div");
-    popup.id = "voice-recording-popup";
-    Object.assign(popup.style, {
+    controls = document.createElement("div");
+    controls.id = "voice-recording-controls";
+    Object.assign(controls.style, {
       position: "absolute",
       bottom: "100%",
       left: "50%",
       transform: "translateX(-50%)",
       marginBottom: "14px",
-      padding: "8px 14px",
-      background: "#E41E3F",
-      color: "white",
-      borderRadius: "20px",
-      fontSize: "13px",
-      fontWeight: "bold",
-      fontFamily: "inherit",
+      padding: "12px",
+      background: "#fff",
+      border: "1px solid #ddd",
+      borderRadius: "16px",
       boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
       display: "none",
+      flexDirection: "column",
       alignItems: "center",
-      gap: "8px",
-      whiteSpace: "nowrap",
+      gap: "12px",
       zIndex: "9999",
-      pointerEvents: "none",
-      transition: "background 0.2s ease",
+      pointerEvents: "auto",
     });
 
-    const dot = document.createElement("div");
-    dot.id = "voice-recording-dot";
-    Object.assign(dot.style, {
-      width: "8px",
-      height: "8px",
-      backgroundColor: "white",
-      borderRadius: "50%",
-    });
-
-    const text = document.createElement("span");
-    text.id = "voice-recording-text";
-
-    popup.appendChild(dot);
-    popup.appendChild(text);
+    controls.innerHTML = `
+      <canvas id="voice-visualizer" width="200" height="24" style="display:block; width: 100%; border-bottom: 1px solid #f0f2f5; padding-bottom: 8px;"></canvas>
+      
+      <div style="display:flex; justify-content: space-between; align-items:center; width: 100%; gap: 16px;">
+        <div style="display:flex; align-items:center; gap: 8px; padding-left: 4px;">
+          <div id="voice-recording-dot" style="width:8px; height:8px; background-color:#E41E3F; border-radius:50%;"></div>
+          <span style="font-size:13px; font-family:inherit; color:#1c1e21; font-weight:bold;">Recording...</span>
+        </div>
+        <div style="display:flex; gap: 6px;">
+          <button id="voice-cancel-btn" class="voice-ctrl-btn" style="background: #65676B; display: flex; align-items: center; gap: 4px;">Cancel 
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+          <path d="M10 12L14 16M14 12L10 16M4 6H20M16 6L15.7294 5.18807C15.4671 4.40125 15.3359 4.00784 15.0927 3.71698C14.8779 3.46013 14.6021 3.26132 14.2905 3.13878C13.9376 3 13.523 3 12.6936 3H11.3064C10.477 3 10.0624 3 9.70951 3.13878C9.39792 3.26132 9.12208 3.46013 8.90729 3.71698C8.66405 4.00784 8.53292 4.40125 8.27064 5.18807L8 6M18 6V16.2C18 17.8802 18 18.7202 17.673 19.362C17.3854 19.9265 16.9265 20.3854 16.362 20.673C15.7202 21 14.8802 21 13.2 21H10.8C9.11984 21 8.27976 21 7.63803 20.673C7.07354 20.3854 6.6146 19.9265 6.32698 19.362C6 18.7202 6 17.8802 6 16.2V6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          </button>
+          <button id="voice-send-btn" class="voice-ctrl-btn" style="background: #0866FF; display: flex; align-items: center; gap: 4px;">Done 
+          <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+            <path fill="#ffffff" fill-rule="evenodd" d="M3 10a7 7 0 019.307-6.611 1 1 0 00.658-1.889 9 9 0 105.98 7.501 1 1 0 00-1.988.22A7 7 0 113 10zm14.75-5.338a1 1 0 00-1.5-1.324l-6.435 7.28-3.183-2.593a1 1 0 00-1.264 1.55l3.929 3.2a1 1 0 001.38-.113l7.072-8z"/>
+          </svg>
+          </button>
+        </div>
+      </div>
+    `;
 
     wrapperElement.style.position = "relative";
-    wrapperElement.appendChild(popup);
+    wrapperElement.appendChild(controls);
+
+    document
+      .getElementById("voice-cancel-btn")
+      .addEventListener("click", cancelRecording);
+    document
+      .getElementById("voice-send-btn")
+      .addEventListener("click", stopRecordingAndSend);
   }
-  return popup;
+  return controls;
 }
 
-// ====== WATCH FOR UI (HIGH-SPEED & OPTIMIZED) ======
+// ====== WATCH FOR UI ======
 function watchForMessengerUI() {
   const root = document.body;
   if (!root) return;
@@ -267,6 +328,15 @@ function watchForMessengerUI() {
   let isChecking = false;
 
   const observer = new MutationObserver(() => {
+    if (
+      isRecording &&
+      !document.body.contains(document.getElementById("voice-mic-btn-wrapper"))
+    ) {
+      console.log("🚫 User navigated away. Cancelling active recording.");
+      cancelRecording();
+      return;
+    }
+
     if (document.getElementById("voice-mic-btn-wrapper")) return;
 
     if (isChecking) return;
@@ -279,43 +349,16 @@ function watchForMessengerUI() {
   });
 
   observer.observe(root, { childList: true, subtree: true });
-
   injectMicButton();
 }
 
 watchForMessengerUI();
 
-// ====== INITIAL PERMISSION REQUEST ======
-async function requestMicPermissionOnLoad() {
-  try {
-    // Check if permission is already granted so we don't flash the mic icon unnecessarily
-    const permissionStatus = await navigator.permissions.query({
-      name: "microphone",
-    });
-
-    if (permissionStatus.state === "prompt") {
-      // console.log("🛡️ Requesting initial microphone permission...");
-      // This triggers the browser popup
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      // Immediately stop the tracks so the microphone doesn't stay active
-      stream.getTracks().forEach((track) => track.stop());
-      // console.log("✅ Initial microphone permission granted.");
-    }
-  } catch (err) {
-    // If the browser blocks the auto-prompt due to lack of user interaction,
-    // it will gracefully fail here and just ask when they click the button later.
-    console.log("Could not request initial microphone permission:", err);
-  }
-}
-
-// Fire the permission request when the page loads
-requestMicPermissionOnLoad();
-
 // ====== ATTACH & SEND AUDIO ======
 async function attachAndSendAudio(blob) {
-  const fileName = `voice_${Date.now()}.webm`;
-  const file = new File([blob], fileName, { type: blob.type || "audio/webm" });
+  // Update file name to .mp3 to trigger Messenger's native audio player seamlessly
+  const fileName = `voice_${Date.now()}.mp3`;
+  const file = new File([blob], fileName, { type: blob.type || "audio/mp3" });
 
   const contentEditable = document.querySelector('[contenteditable="true"]');
   const dropTarget =
@@ -417,15 +460,22 @@ function showPermissionEducation() {
     .addEventListener("click", async () => {
       overlay.remove();
       try {
-        // Trigger the browser prompt now that they are educated
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
         });
-        stream.getTracks().forEach((t) => t.stop()); // Immediately close it
-
-        alert("✅ Setup complete! You can now hold the mic button to record.");
+        stream.getTracks().forEach((t) => t.stop());
+        alert("✅ Setup complete! You can now click the mic button to record.");
       } catch (err) {
         console.log("User blocked permission after education.", err);
       }
     });
 }
+
+// ====== EMERGENCY CLEANUP ======
+window.addEventListener("pagehide", () => {
+  if (isRecording && mediaRecorder) {
+    mediaRecorder.stop();
+    mediaRecorder.stream?.getTracks()?.forEach((t) => t.stop());
+    isRecording = false;
+  }
+});

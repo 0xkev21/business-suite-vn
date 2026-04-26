@@ -29,7 +29,7 @@
   "content_scripts": [
     {
       "matches": ["https://business.facebook.com/latest/inbox/*"],
-      "js": ["scripts/content.js"],
+      "js": ["libs/lame.min.js", "scripts/content.js"],
       "run_at": "document_idle"
     }
   ]
