@@ -445,7 +445,7 @@ function showPermissionEducation() {
     <h2 style="margin: 0 0 12px 0; font-size: 20px;">One-Time Microphone Setup</h2>
     <p style="margin: 0 0 20px 0; font-size: 15px; color: #65676b; line-height: 1.5;">
       To make voice notes fast, the browser needs permission.<br><br>
-      When the prompt appears at the top of your screen, please select <strong>"Allow on every visit" (or "Forever")</strong> so you don't have to do this every time.
+      When the prompt appears at the top of your screen, please select <strong>"Always Allow" (or "Forever")</strong> so you don't have to do this every time.
     </p>
     <button id="voice-understand-btn" style="background: #0866FF; color: white; border: none; padding: 10px 24px; border-radius: 6px; font-weight: bold; font-size: 15px; cursor: pointer; transition: 0.2s;">
       I Understand
