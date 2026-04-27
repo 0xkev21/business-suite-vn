@@ -320,7 +320,7 @@ function getOrCreateControls(wrapperElement) {
   return controls;
 }
 
-// ====== WATCH FOR UI ======
+// ====== WATCH FOR UI (SPA OPTIMIZED) ======
 function watchForMessengerUI() {
   const root = document.body;
   if (!root) return;
@@ -328,6 +328,13 @@ function watchForMessengerUI() {
   let isChecking = false;
 
   const observer = new MutationObserver(() => {
+    // --- NEW: SPA URL Check ---
+    // Only hunt for the toolbar if we are actually in the Inbox
+    if (!window.location.href.includes("/latest/inbox")) {
+      return;
+    }
+    // --------------------------
+
     if (
       isRecording &&
       !document.body.contains(document.getElementById("voice-mic-btn-wrapper"))
@@ -349,8 +356,14 @@ function watchForMessengerUI() {
   });
 
   observer.observe(root, { childList: true, subtree: true });
-  injectMicButton();
+
+  // Initial check just in case we loaded directly into the inbox
+  if (window.location.href.includes("/latest/inbox")) {
+    injectMicButton();
+  }
 }
+
+watchForMessengerUI();
 
 watchForMessengerUI();
 
