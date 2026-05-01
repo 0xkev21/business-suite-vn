@@ -65,60 +65,91 @@ function cleanupUI() {
 
   const controls = document.getElementById("voice-recording-controls");
   if (controls) controls.style.display = "none";
+
+  // Revert back to canvas mode for the next recording
+  const canvas = document.getElementById("voice-visualizer");
+  const spinner = document.getElementById("voice-spinner");
+  if (canvas) canvas.style.display = "block";
+  if (spinner) spinner.style.display = "none";
+
+  const sendBtn = document.getElementById("voice-send-btn");
+  if (sendBtn) {
+    sendBtn.disabled = false;
+    sendBtn.style.opacity = "1";
+    sendBtn.style.cursor = "pointer";
+  }
+
+  const cancelBtn = document.getElementById("voice-cancel-btn");
+  if (cancelBtn) {
+    cancelBtn.disabled = false;
+    cancelBtn.style.opacity = "1";
+    cancelBtn.style.cursor = "pointer";
+  }
 }
 
 async function stopRecordingAndSend() {
   if (!isRecording || !mediaRecorder) return;
-  cleanupUI();
+
+  // 1. Instantly show feedback and swap to the spinner
+  setUIProcessingState("Processing audio...");
 
   return new Promise((resolve) => {
     mediaRecorder.onstop = async () => {
+      // Yield to let the DOM update before heavy math starts
+      await new Promise((r) => requestAnimationFrame(r));
+      await new Promise((r) => setTimeout(r, 50));
+
       const webmBlob = new Blob(audioChunks, { type: "audio/webm" });
       isRecording = false;
 
       try {
-        // --- NEW: LAMEJS MP3 ENCODING PIPELINE ---
         const arrayBuffer = await webmBlob.arrayBuffer();
         if (!audioContext)
           audioContext = new (
             window.AudioContext || window.webkitAudioContext
           )();
 
-        // Decode the raw webm audio
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-        // Prepare LameJS Encoder (Mono, 128kbps)
         const sampleRate = audioBuffer.sampleRate;
         const mp3encoder = new lamejs.Mp3Encoder(1, sampleRate, 128);
-        const samples = audioBuffer.getChannelData(0); // Get mono audio track
+        const samples = audioBuffer.getChannelData(0);
         const mp3Data = [];
 
-        // Convert float32 audio data to int16 (Required by LameJS)
         const sampleBlockSize = 1152;
         const intSamples = new Int16Array(samples.length);
         for (let i = 0; i < samples.length; i++) {
           let sample = samples[i];
-          // Fast clamp and scale to 16-bit signed integer
           sample = sample < 0 ? sample * 32768 : sample * 32767;
           intSamples[i] = sample;
         }
 
-        // Encode in chunks
+        // --- THE FIX: CHUNKED ENCODING LOOP ---
+        let chunkCounter = 0;
         for (let i = 0; i < intSamples.length; i += sampleBlockSize) {
           const chunk = intSamples.subarray(i, i + sampleBlockSize);
           const mp3buf = mp3encoder.encodeBuffer(chunk);
           if (mp3buf.length > 0) mp3Data.push(mp3buf);
-        }
 
-        // Flush the final data
+          chunkCounter++;
+          // Every ~50 chunks, yield to the main thread for 0ms so the CSS spinner can rotate
+          if (chunkCounter % 50 === 0) {
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+        // -------------------------------------
+
         const mp3buf = mp3encoder.flush();
         if (mp3buf.length > 0) mp3Data.push(mp3buf);
 
-        // Compile the final MP3 file
         const mp3Blob = new Blob(mp3Data, { type: "audio/mp3" });
+
+        setUIProcessingState("Sending message...");
         await attachAndSendAudio(mp3Blob);
+
+        cleanupUI();
       } catch (err) {
         console.log("Error encoding MP3:", err);
+        cleanupUI();
       }
       resolve();
     };
@@ -254,12 +285,21 @@ function getOrCreateControls(wrapperElement) {
         50% { transform: scale(1.3); opacity: 0.6; }
         100% { transform: scale(0.95); opacity: 1; }
       }
+      @keyframes spin-loader { 
+        0% { transform: rotate(0deg); } 
+        100% { transform: rotate(360deg); } 
+      }
       #voice-recording-dot { animation: pulse-dot 1.5s infinite; }
       .voice-ctrl-btn {
         border: none; padding: 6px 12px; border-radius: 14px; font-weight: bold; 
         font-size: 13px; cursor: pointer; transition: opacity 0.2s; color: white;
       }
       .voice-ctrl-btn:hover { opacity: 0.8; }
+      .voice-spinner { 
+        width: 18px; height: 18px; border: 3px solid #f0f2f5; 
+        border-top: 3px solid #0866FF; border-radius: 50%; 
+        animation: spin-loader 1s linear infinite; 
+      }
     `;
     document.head.appendChild(style);
 
@@ -285,7 +325,10 @@ function getOrCreateControls(wrapperElement) {
     });
 
     controls.innerHTML = `
-      <canvas id="voice-visualizer" width="200" height="24" style="display:block; width: 100%; border-bottom: 1px solid #f0f2f5; padding-bottom: 8px;"></canvas>
+      <div id="voice-vis-container" style="width: 100%; border-bottom: 1px solid #f0f2f5; padding-bottom: 8px; display: flex; justify-content: center; align-items: center; min-height: 33px;">
+        <canvas id="voice-visualizer" width="200" height="24" style="display:block; width: 100%;"></canvas>
+        <div id="voice-spinner" class="voice-spinner" style="display:none;"></div>
+      </div>
       
       <div style="display:flex; justify-content: space-between; align-items:center; width: 100%; gap: 16px;">
         <div style="display:flex; align-items:center; gap: 8px; padding-left: 4px;">
@@ -294,14 +337,10 @@ function getOrCreateControls(wrapperElement) {
         </div>
         <div style="display:flex; gap: 6px;">
           <button id="voice-cancel-btn" class="voice-ctrl-btn" style="background: #65676B; display: flex; align-items: center; gap: 4px;">Cancel 
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-          <path d="M10 12L14 16M14 12L10 16M4 6H20M16 6L15.7294 5.18807C15.4671 4.40125 15.3359 4.00784 15.0927 3.71698C14.8779 3.46013 14.6021 3.26132 14.2905 3.13878C13.9376 3 13.523 3 12.6936 3H11.3064C10.477 3 10.0624 3 9.70951 3.13878C9.39792 3.26132 9.12208 3.46013 8.90729 3.71698C8.66405 4.00784 8.53292 4.40125 8.27064 5.18807L8 6M18 6V16.2C18 17.8802 18 18.7202 17.673 19.362C17.3854 19.9265 16.9265 20.3854 16.362 20.673C15.7202 21 14.8802 21 13.2 21H10.8C9.11984 21 8.27976 21 7.63803 20.673C7.07354 20.3854 6.6146 19.9265 6.32698 19.362C6 18.7202 6 17.8802 6 16.2V6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M10 12L14 16M14 12L10 16M4 6H20M16 6L15.7294 5.18807C15.4671 4.40125 15.3359 4.00784 15.0927 3.71698C14.8779 3.46013 14.6021 3.26132 14.2905 3.13878C13.9376 3 13.523 3 12.6936 3H11.3064C10.477 3 10.0624 3 9.70951 3.13878C9.39792 3.26132 9.12208 3.46013 8.90729 3.71698C8.66405 4.00784 8.53292 4.40125 8.27064 5.18807L8 6M18 6V16.2C18 17.8802 18 18.7202 17.673 19.362C17.3854 19.9265 16.9265 20.3854 16.362 20.673C15.7202 21 14.8802 21 13.2 21H10.8C9.11984 21 8.27976 21 7.63803 20.673C7.07354 20.3854 6.6146 19.9265 6.32698 19.362C6 18.7202 6 17.8802 6 16.2V6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           <button id="voice-send-btn" class="voice-ctrl-btn" style="background: #0866FF; display: flex; align-items: center; gap: 4px;">Done 
-          <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
-            <path fill="#ffffff" fill-rule="evenodd" d="M3 10a7 7 0 019.307-6.611 1 1 0 00.658-1.889 9 9 0 105.98 7.501 1 1 0 00-1.988.22A7 7 0 113 10zm14.75-5.338a1 1 0 00-1.5-1.324l-6.435 7.28-3.183-2.593a1 1 0 00-1.264 1.55l3.929 3.2a1 1 0 001.38-.113l7.072-8z"/>
-          </svg>
+          <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path fill="#ffffff" fill-rule="evenodd" d="M3 10a7 7 0 019.307-6.611 1 1 0 00.658-1.889 9 9 0 105.98 7.501 1 1 0 00-1.988.22A7 7 0 113 10zm14.75-5.338a1 1 0 00-1.5-1.324l-6.435 7.28-3.183-2.593a1 1 0 00-1.264 1.55l3.929 3.2a1 1 0 001.38-.113l7.072-8z"/></svg>
           </button>
         </div>
       </div>
@@ -365,61 +404,90 @@ function watchForMessengerUI() {
 
 watchForMessengerUI();
 
-watchForMessengerUI();
-
 // ====== ATTACH & SEND AUDIO ======
 async function attachAndSendAudio(blob) {
-  // Update file name to .mp3 to trigger Messenger's native audio player seamlessly
   const fileName = `voice_${Date.now()}.mp3`;
   const file = new File([blob], fileName, { type: blob.type || "audio/mp3" });
-
-  const contentEditable = document.querySelector('[contenteditable="true"]');
-  const dropTarget =
-    contentEditable?.closest('[role="textbox"], [role="presentation"]') ||
-    contentEditable?.parentElement ||
-    document.body;
-
-  if (!dropTarget) {
-    console.log("❌ Could not locate drop target for Messenger.");
-    return;
-  }
-
   const dataTransfer = new DataTransfer();
   dataTransfer.items.add(file);
 
-  const dragEnter = new DragEvent("dragenter", { bubbles: true, dataTransfer });
-  const dragOver = new DragEvent("dragover", { bubbles: true, dataTransfer });
-  const drop = new DragEvent("drop", { bubbles: true, dataTransfer });
+  // --- THE REACT BYPASS (Works in Chrome & Firefox) ---
+  // Look for Meta's hidden file upload input
+  const fileInput = document.querySelector('input[type="file"]');
 
-  dropTarget.dispatchEvent(dragEnter);
-  dropTarget.dispatchEvent(dragOver);
-  dropTarget.dispatchEvent(drop);
+  if (fileInput) {
+    try {
+      // Bypass React's strict wrapper and force the files into the native HTML element directly
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "files",
+      ).set;
+      nativeInputValueSetter.call(fileInput, dataTransfer.files);
 
-  await new Promise((r) => setTimeout(r, 1200));
+      // Tell React a change happened so it mounts the audio file to the UI
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
 
-  const sendBtn = document.querySelector(
-    'div[aria-label="Press Enter to send"], div[aria-label="Send"]',
-  );
+      // Wait a moment for Meta's UI to process the file and render the visual attachment
+      await new Promise((r) => setTimeout(r, 1200));
 
-  if (sendBtn) {
-    sendBtn.click();
-    return;
+      // Find and click the send button
+      const sendBtn = document.querySelector(
+        'div[aria-label="Press Enter to send"], div[aria-label="Send"], [aria-label="Send"]',
+      );
+
+      if (sendBtn) {
+        sendBtn.click();
+      } else {
+        // Fallback if the button is hidden
+        const chatBox = document.querySelector('[contenteditable="true"]');
+        if (chatBox) {
+          chatBox.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Enter",
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+        }
+      }
+      return; // Stop here if the input method worked
+    } catch (err) {
+      console.error("React bypass failed:", err);
+    }
   }
 
-  if (contentEditable) {
-    contentEditable.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Enter",
-        bubbles: true,
-        cancelable: true,
-      }),
+  // --- FALLBACK: THE CHROME PASTE HACK ---
+  // If the file input is completely missing for some reason, fall back to the paste method
+  // (which we know works flawlessly in Chrome).
+  const chatBox = document.querySelector('[contenteditable="true"]');
+  if (chatBox) {
+    chatBox.focus();
+    const pasteEvent = new ClipboardEvent("paste", {
+      clipboardData: dataTransfer,
+      bubbles: true,
+      cancelable: true,
+    });
+    chatBox.dispatchEvent(pasteEvent);
+
+    await new Promise((r) => setTimeout(r, 1200));
+
+    const sendBtn = document.querySelector(
+      'div[aria-label="Press Enter to send"], div[aria-label="Send"], [aria-label="Send"]',
     );
-    return;
+    if (sendBtn) {
+      sendBtn.click();
+    } else {
+      chatBox.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }
+  } else {
+    console.log("❌ Could not locate file input or chat box.");
   }
-
-  console.log(
-    "⚠️ File attached but send button not found and contentEditable missing. You might need to hit Enter manually.",
-  );
 }
 
 // ====== EDUCATIONAL PERMISSION MODAL ======
@@ -482,6 +550,35 @@ function showPermissionEducation() {
         console.log("User blocked permission after education.", err);
       }
     });
+}
+
+// ====== UI FEEDBACK STATE ======
+function setUIProcessingState(statusText) {
+  const textElement = document.querySelector("#voice-recording-controls span");
+  if (textElement) textElement.innerText = statusText;
+
+  const dot = document.getElementById("voice-recording-dot");
+  if (dot) dot.style.backgroundColor = "#0866FF";
+
+  // Hide the frozen visualizer, show the spinning loader
+  const canvas = document.getElementById("voice-visualizer");
+  const spinner = document.getElementById("voice-spinner");
+  if (canvas) canvas.style.display = "none";
+  if (spinner) spinner.style.display = "block";
+
+  const sendBtn = document.getElementById("voice-send-btn");
+  if (sendBtn) {
+    sendBtn.disabled = true;
+    sendBtn.style.opacity = "0.5";
+    sendBtn.style.cursor = "not-allowed";
+  }
+
+  const cancelBtn = document.getElementById("voice-cancel-btn");
+  if (cancelBtn) {
+    cancelBtn.disabled = true;
+    cancelBtn.style.opacity = "0.5";
+    cancelBtn.style.cursor = "not-allowed";
+  }
 }
 
 // ====== EMERGENCY CLEANUP ======
