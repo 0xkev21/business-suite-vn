@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Business Suite Voice Note",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Add push-to-talk voice notes to Meta Business Suite",
 
   "browser_specific_settings": {
