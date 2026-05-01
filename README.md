@@ -11,7 +11,7 @@
   <a href="https://chromewebstore.google.com/detail/Business%20Suite%20Voice%20Note/fhackbmchhomdjfcjpenandgkhahedig">
     <img src="https://img.shields.io/badge/Chrome_Web_Store-Available-1A73E8?style=for-the-badge&logo=google-chrome&logoColor=white" alt="Chrome Web Store">
   </a>
-  <img src="https://img.shields.io/badge/Version-1.1-brightgreen?style=for-the-badge" alt="Version 1.2">
+  <img src="https://img.shields.io/badge/Version-1.2-brightgreen?style=for-the-badge" alt="Version 1.2">
   <img src="https://img.shields.io/badge/Privacy-100%25_Local-blue?style=for-the-badge&logo=shield" alt="Privacy Local">
   <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge" alt="MIT License">
 
