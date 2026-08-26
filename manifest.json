@@ -37,5 +37,12 @@
       "js": ["libs/lame.min.js", "scripts/content.js"],
       "run_at": "document_idle"
     }
+  ],
+  
+  "web_accessible_resources": [
+    {
+      "resources": ["scripts/page-world.js"],
+      "matches": ["<all_urls>"]
+    }
   ]
 }

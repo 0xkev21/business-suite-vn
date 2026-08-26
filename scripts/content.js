@@ -1,21 +1,23 @@
-// ====== MESSENGER VOICE NOTE (refactored) ======
+// ====== MESSENGER VOICE NOTE ======
 (function () {
   "use strict";
 
-  // Small DOM helpers
+  // Prevent duplicate injections from hot-reloading
+  if (window.__voiceExtensionLoaded) return;
+  window.__voiceExtensionLoaded = true;
+
   const $ = (sel, root = document) => root.querySelector(sel);
   const $id = (id) => document.getElementById(id);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
 
-  // Internal state
   let mediaRecorder = null;
   let audioChunks = [];
   let isRecording = false;
   let audioContext = null;
   let animationFrameId = null;
 
-  // Encode an AudioBuffer to MP3 using lamejs (chunked, yields occasionally)
+  // ====== 1. MP3 ENCODING ======
   async function encodeAudioBufferToMp3(audioBuffer) {
     const sampleRate = audioBuffer.sampleRate;
     const encoder = new lamejs.Mp3Encoder(1, sampleRate, 128);
@@ -41,10 +43,9 @@
     return new Blob(mp3Data, { type: "audio/mp3" });
   }
 
-  // ====== RECORDING HANDLERS ======
+  // ====== 2. RECORDING & UI ======
   async function startRecording(e) {
     if (e && e.type === "click") e.preventDefault();
-
     if (isRecording) {
       await stopRecordingAndSend();
       return;
@@ -58,10 +59,7 @@
         showPermissionEducation();
         return;
       }
-    } catch (err) {
-      // Permission API not available; proceed to getUserMedia and handle errors there
-      console.debug("Permission API not available", err);
-    }
+    } catch (err) {}
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -82,7 +80,6 @@
 
       startVisualizer(stream);
     } catch (err) {
-      console.error("Microphone access error:", err);
       alert(
         "Microphone access is blocked. Please click the icon in your URL bar to allow it.",
       );
@@ -94,13 +91,10 @@
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
     }
-
     const micIcon = $id("mic-svg-icon");
     if (micIcon) micIcon.style.color = "currentColor";
-
     const controls = $id("voice-recording-controls");
     if (controls) controls.style.display = "none";
-
     const canvas = $id("voice-visualizer");
     const spinner = $id("voice-spinner");
     if (canvas) canvas.style.display = "block";
@@ -119,15 +113,14 @@
   async function stopRecordingAndSend() {
     if (!isRecording || !mediaRecorder) return;
 
+    isRecording = false;
     setUIProcessingState("Processing audio...");
 
     return new Promise((resolve) => {
       mediaRecorder.onstop = async () => {
         await nextFrame();
         await sleep(50);
-
         const webmBlob = new Blob(audioChunks, { type: "audio/webm" });
-        isRecording = false;
 
         try {
           const arrayBuffer = await webmBlob.arrayBuffer();
@@ -138,16 +131,14 @@
           const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
           const mp3Blob = await encodeAudioBufferToMp3(audioBuffer);
 
-          setUIProcessingState("Sending message...");
+          setUIProcessingState("Attaching message...");
           await attachAndSendAudio(mp3Blob);
           cleanupUI();
         } catch (err) {
-          console.error("Error encoding MP3:", err);
           cleanupUI();
         }
         resolve();
       };
-
       mediaRecorder.stop();
       mediaRecorder.stream?.getTracks()?.forEach((t) => t.stop());
     });
@@ -155,24 +146,19 @@
 
   function cancelRecording() {
     if (!isRecording || !mediaRecorder) return;
+    isRecording = false;
     cleanupUI();
-
-    mediaRecorder.onstop = () => {
-      isRecording = false;
-    };
-
     mediaRecorder.stop();
     mediaRecorder.stream?.getTracks()?.forEach((t) => t.stop());
   }
 
-  // ====== AUDIO WAVE VISUALIZER ======
+  // ====== 3. VISUALIZER ======
   function startVisualizer(stream) {
     if (!audioContext) {
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
     } else if (audioContext.state === "suspended") {
       audioContext.resume();
     }
-
     const source = audioContext.createMediaStreamSource(stream);
     const analyser = audioContext.createAnalyser();
     analyser.fftSize = 256;
@@ -180,7 +166,6 @@
 
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-
     const canvas = $id("voice-visualizer");
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -188,12 +173,11 @@
     function draw() {
       if (!isRecording) return;
       animationFrameId = requestAnimationFrame(draw);
-
       analyser.getByteFrequencyData(dataArray);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const barWidth = 3;
-      const gap = 3;
+      const barWidth = 3,
+        gap = 3;
       const numBars = Math.floor(canvas.width / (barWidth + gap));
       const step = Math.max(1, Math.floor(bufferLength / numBars));
 
@@ -205,7 +189,6 @@
           if (idx < bufferLength) sum += dataArray[idx];
         }
         const average = sum / step;
-
         const barHeight = Math.max(2, (average / 255) * canvas.height);
         const y = (canvas.height - barHeight) / 2;
 
@@ -217,32 +200,24 @@
         } else {
           ctx.fillRect(x, y, barWidth, barHeight);
         }
-
         x += barWidth + gap;
       }
     }
-
     draw();
   }
 
-  // ====== INJECT MIC BUTTON ======
+  // ====== 4. INJECT BUTTON & CONTROLS ======
   function injectMicButton() {
     if ($("#voice-mic-btn-wrapper")) return;
-
-    const anchorBtn = document.querySelector('[aria-label="Attach a file"]');
+    const anchorBtn = document.querySelector(
+      '[aria-label="Attach a file"], [aria-label="Attach photo or video"]',
+    );
     if (!anchorBtn) return;
 
     const buttonWrapper =
       anchorBtn.closest(".x1rg5ohu.x67bb7w") || anchorBtn.parentElement;
     const micWrapperClone = buttonWrapper.cloneNode(true);
     micWrapperClone.id = "voice-mic-btn-wrapper";
-
-    if (
-      micWrapperClone.hasAttribute("id") &&
-      micWrapperClone.id !== "voice-mic-btn-wrapper"
-    ) {
-      micWrapperClone.removeAttribute("id");
-    }
 
     const clickableArea = micWrapperClone.querySelector('[role="button"]');
     if (clickableArea) {
@@ -255,22 +230,18 @@
     );
     if (iconContainer) {
       iconContainer.innerHTML = `
-      <svg viewBox="0 0 20 20" fill="currentColor" width="20" height="20" color="currentColor" id="mic-svg-icon" style="transition: color 0.2s ease;">
+      <svg viewBox="0 0 20 20" fill="currentColor" width="20" height="20" id="mic-svg-icon" style="transition: color 0.2s ease;">
         <path d="M10 14a3.5 3.5 0 0 0 3.5-3.5V5a3.5 3.5 0 0 0-7 0v5.5A3.5 3.5 0 0 0 10 14zm-5-3.5a.5.5 0 0 1 1 0 4 4 0 1 0 8 0 .5.5 0 0 1 1 0 5 5 0 0 1-4.5 4.975V18h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.525A5 5 0 0 1 5 10.5z"></path>
-      </svg>
-    `;
+      </svg>`;
     }
 
     const targetBtn = clickableArea || micWrapperClone;
-    targetBtn.addEventListener("click", startRecording);
-
+    targetBtn.onclick = startRecording;
     buttonWrapper.insertAdjacentElement("afterend", micWrapperClone);
   }
 
-  // ====== INTERACTIVE FLOATING CONTROLS ======
   function getOrCreateControls(wrapperElement) {
     let controls = $id("voice-recording-controls");
-
     if (!controls) {
       if (!document.getElementById("voice-recording-styles")) {
         const style = document.createElement("style");
@@ -318,133 +289,87 @@
           <span style="font-size:13px;font-family:inherit;color:#1c1e21;font-weight:bold">Recording...</span>
         </div>
         <div style="display:flex;gap:6px">
-          <button id="voice-cancel-btn" class="voice-ctrl-btn" style="background:#65676B;display:flex;align-items:center;gap:4px">Cancel
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M10 12L14 16M14 12L10 16M4 6H20M16 6L15.7294 5.18807C15.4671 4.40125 15.3359 4.00784 15.0927 3.71698C14.8779 3.46013 14.6021 3.26132 14.2905 3.13878C13.9376 3 13.523 3 12.6936 3H11.3064C10.477 3 10.0624 3 9.70951 3.13878C9.39792 3.26132 9.12208 3.46013 8.90729 3.71698C8.66405 4.00784 8.53292 4.40125 8.27064 5.18807L8 6M18 6V16.2C18 17.8802 18 18.7202 17.673 19.362C17.3854 19.9265 16.9265 20.3854 16.362 20.673C15.7202 21 14.8802 21 13.2 21H10.8C9.11984 21 8.27976 21 7.63803 20.673C7.07354 20.3854 6.6146 19.9265 6.32698 19.362C6 18.7202 6 17.8802 6 16.2V6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-          <button id="voice-send-btn" class="voice-ctrl-btn" style="background:#0866FF;display:flex;align-items:center;gap:4px">Done
-            <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path fill="#ffffff" fill-rule="evenodd" d="M3 10a7 7 0 019.307-6.611 1 1 0 00.658-1.889 9 9 0 105.98 7.501 1 1 0 00-1.988.22A7 7 0 113 10zm14.75-5.338a1 1 0 00-1.5-1.324l-6.435 7.28-3.183-2.593a1 1 0 00-1.264 1.55l3.929 3.2a1 1 0 001.38-.113l7.072-8z"/></svg>
-          </button>
+          <button id="voice-cancel-btn" class="voice-ctrl-btn" style="background:#65676B;display:flex;align-items:center;gap:4px">Cancel</button>
+          <button id="voice-send-btn" class="voice-ctrl-btn" style="background:#0866FF;display:flex;align-items:center;gap:4px">Done</button>
         </div>
       </div>
       `;
-
       wrapperElement.style.position = "relative";
       wrapperElement.appendChild(controls);
-
-      $id("voice-cancel-btn").addEventListener("click", cancelRecording);
-      $id("voice-send-btn").addEventListener("click", stopRecordingAndSend);
     }
-
+    $id("voice-cancel-btn").onclick = cancelRecording;
+    $id("voice-send-btn").onclick = stopRecordingAndSend;
     return controls;
   }
 
-  // ====== WATCH FOR UI (SPA OPTIMIZED) ======
-  function watchForMessengerUI() {
-    const root = document.body;
-    if (!root) return;
-
-    let isChecking = false;
-
-    const observer = new MutationObserver(() => {
-      if (!window.location.href.includes("/latest/inbox")) return;
-
-      if (
-        isRecording &&
-        !document.body.contains($id("voice-mic-btn-wrapper"))
-      ) {
-        console.log("🚫 User navigated away. Cancelling active recording.");
-        cancelRecording();
-        return;
-      }
-
-      if ($id("voice-mic-btn-wrapper")) return;
-      if (isChecking) return;
-      isChecking = true;
-
-      requestAnimationFrame(() => {
-        injectMicButton();
-        isChecking = false;
-      });
-    });
-
-    observer.observe(root, { childList: true, subtree: true });
-
-    if (window.location.href.includes("/latest/inbox")) injectMicButton();
+  // ====== 5. ATTACH & SEND ======
+  function injectPageWorldScript() {
+    const script = document.createElement("script");
+    script.src = browser.runtime.getURL("scripts/page-world.js");
+    script.onload = () => script.remove();
+    (document.head || document.documentElement).appendChild(script);
   }
 
-  watchForMessengerUI();
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
 
-  // ====== ATTACH & SEND AUDIO ======
   async function attachAndSendAudio(blob) {
     const fileName = `voice_${Date.now()}.mp3`;
-    const file = new File([blob], fileName, { type: blob.type || "audio/mp3" });
-    const dataTransfer = new DataTransfer();
-    dataTransfer.items.add(file);
+    const mimeType = blob.type || "audio/mp3";
 
-    const fileInput = document.querySelector('input[type="file"]');
-
-    if (fileInput) {
-      try {
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype,
-          "files",
-        ).set;
-        nativeSetter.call(fileInput, dataTransfer.files);
-        fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-        await sleep(1200);
-
-        const sendBtn = document.querySelector(
-          'div[aria-label="Press Enter to send"], div[aria-label="Send"], [aria-label="Send"]',
-        );
-        if (sendBtn) sendBtn.click();
-        else {
-          const chatBox = document.querySelector('[contenteditable="true"]');
-          if (chatBox)
-            chatBox.dispatchEvent(
-              new KeyboardEvent("keydown", {
-                key: "Enter",
-                bubbles: true,
-                cancelable: true,
-              }),
-            );
-        }
+    try {
+      const base64 = await blobToBase64(blob);
+      const chatBox = document.querySelector('[contenteditable="true"]');
+      if (!chatBox) {
         return;
-      } catch (err) {
-        console.error("React bypass failed:", err);
       }
-    }
 
-    const chatBox = document.querySelector('[contenteditable="true"]');
-    if (chatBox) {
       chatBox.focus();
-      const pasteEvent = new ClipboardEvent("paste", {
-        clipboardData: dataTransfer,
-        bubbles: true,
-        cancelable: true,
-      });
-      chatBox.dispatchEvent(pasteEvent);
-      await sleep(1200);
-      const sendBtn = document.querySelector(
-        'div[aria-label="Press Enter to send"], div[aria-label="Send"], [aria-label="Send"]',
+
+      const detail = { base64, fileName, mimeType };
+      const eventDetail =
+        typeof cloneInto === "function" ? cloneInto(detail, window) : detail;
+      document.dispatchEvent(
+        new CustomEvent("VoiceExtSendAudio", {
+          detail: eventDetail,
+          bubbles: true,
+        }),
       );
-      if (sendBtn) sendBtn.click();
-      else
-        chatBox.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "Enter",
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-    } else {
-      console.log("❌ Could not locate file input or chat box.");
+
+      await sleep(2500);
+    } catch (err) {
+      return;
     }
   }
 
-  // ====== EDUCATIONAL PERMISSION MODAL ======
+  // ====== 6. MISC HELPERS ======
+  function setUIProcessingState(statusText) {
+    const textElement = $("#voice-recording-controls span");
+    if (textElement) textElement.innerText = statusText;
+    const dot = $id("voice-recording-dot");
+    if (dot) dot.style.backgroundColor = "#0866FF";
+    const canvas = $id("voice-visualizer");
+    const spinner = $id("voice-spinner");
+    if (canvas) canvas.style.display = "none";
+    if (spinner) spinner.style.display = "block";
+    ["voice-send-btn", "voice-cancel-btn"].forEach((id) => {
+      const el = $id(id);
+      if (el) {
+        el.disabled = true;
+        el.style.opacity = "0.5";
+        el.style.cursor = "not-allowed";
+      }
+    });
+  }
+
   function showPermissionEducation() {
     if ($id("voice-permission-modal")) return;
-
     const overlay = document.createElement("div");
     overlay.id = "voice-permission-modal";
     Object.assign(overlay.style, {
@@ -460,7 +385,6 @@
       zIndex: "999999",
       fontFamily: "inherit",
     });
-
     const modal = document.createElement("div");
     Object.assign(modal.style, {
       background: "#fff",
@@ -471,63 +395,49 @@
       boxShadow: "0 12px 28px rgba(0,0,0,0.2)",
       textAlign: "center",
     });
-
     modal.innerHTML = `
       <div style="font-size:32px;margin-bottom:12px">🎙️</div>
       <h2 style="margin:0 0 12px 0;font-size:20px">One-Time Microphone Setup</h2>
-      <p style="margin:0 0 20px 0;font-size:15px;color:#65676b;line-height:1.5">
-        To make voice notes fast, the browser needs permission.<br><br>
-        When the prompt appears at the top of your screen, please select <strong>"Always Allow" (or "Forever")</strong> so you don't have to do this every time.
-      </p>
-      <button id="voice-understand-btn" style="background:#0866FF;color:white;border:none;padding:10px 24px;border-radius:6px;font-weight:bold;font-size:15px;cursor:pointer;transition:.2s">I Understand</button>
+      <p style="margin:0 0 20px 0;font-size:15px;color:#65676b;line-height:1.5">To make voice notes fast, the browser needs permission.<br><br>Select <strong>"Always Allow"</strong> so you don't have to do this every time.</p>
+      <button id="voice-understand-btn" style="background:#0866FF;color:white;border:none;padding:10px 24px;border-radius:6px;font-weight:bold;font-size:15px;cursor:pointer;">I Understand</button>
     `;
-
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
-
-    $id("voice-understand-btn").addEventListener("click", async () => {
+    $id("voice-understand-btn").onclick = async () => {
       overlay.remove();
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
         });
         stream.getTracks().forEach((t) => t.stop());
-        alert("✅ Setup complete! You can now click the mic button to record.");
-      } catch (err) {
-        console.log("User blocked permission after education.", err);
+      } catch (err) {}
+    };
+  }
+
+  function watchForMessengerUI() {
+    const root = document.body;
+    if (!root) return;
+    let isChecking = false;
+    const observer = new MutationObserver(() => {
+      if (!window.location.href.includes("/latest/inbox")) return;
+      if (
+        isRecording &&
+        !document.body.contains($id("voice-mic-btn-wrapper"))
+      ) {
+        cancelRecording();
+        return;
       }
+      if ($id("voice-mic-btn-wrapper") || isChecking) return;
+      isChecking = true;
+      requestAnimationFrame(() => {
+        injectMicButton();
+        isChecking = false;
+      });
     });
+    observer.observe(root, { childList: true, subtree: true });
+    if (window.location.href.includes("/latest/inbox")) injectMicButton();
   }
 
-  // ====== UI FEEDBACK STATE ======
-  function setUIProcessingState(statusText) {
-    const textElement = $("#voice-recording-controls span");
-    if (textElement) textElement.innerText = statusText;
-
-    const dot = $id("voice-recording-dot");
-    if (dot) dot.style.backgroundColor = "#0866FF";
-
-    const canvas = $id("voice-visualizer");
-    const spinner = $id("voice-spinner");
-    if (canvas) canvas.style.display = "none";
-    if (spinner) spinner.style.display = "block";
-
-    const sendBtn = $id("voice-send-btn");
-    if (sendBtn) {
-      sendBtn.disabled = true;
-      sendBtn.style.opacity = "0.5";
-      sendBtn.style.cursor = "not-allowed";
-    }
-
-    const cancelBtn = $id("voice-cancel-btn");
-    if (cancelBtn) {
-      cancelBtn.disabled = true;
-      cancelBtn.style.opacity = "0.5";
-      cancelBtn.style.cursor = "not-allowed";
-    }
-  }
-
-  // ====== EMERGENCY CLEANUP ======
   window.addEventListener("pagehide", () => {
     if (isRecording && mediaRecorder) {
       mediaRecorder.stop();
@@ -535,4 +445,7 @@
       isRecording = false;
     }
   });
+
+  injectPageWorldScript();
+  watchForMessengerUI();
 })();
